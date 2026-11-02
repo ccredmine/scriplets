@@ -1,0 +1,5 @@
+# Lokale Konfiguration / Arbeitsdateien von comment-edit
+.redmine_config
+current-ticket.rtf
+.current-ticket.html
+.DS_Store

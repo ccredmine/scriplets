@@ -23,7 +23,7 @@ CONFIG_FILE="$SCRIPT_DIR/.redmine_config"
 RTF_NAME="current-ticket.rtf"
 RTF_FILE="$SCRIPT_DIR/$RTF_NAME"
 MAX_COMMENTS_TERM=3
-MAX_COMMENTS_RTF=5
+# In der RTF landen immer alle Kommentare in voller Länge; im Terminal nur die ersten MAX_COMMENTS_TERM.
 
 # ── Terminal / Farben ────────────────────────────────────────────────────
 if [ -t 1 ]; then TTY=1; else TTY=0; fi
@@ -206,7 +206,7 @@ write_rtf() {
         printf '<p style="color: #666666;">Neuer Kommentar an beliebiger Stelle: Zeile <b>== KOMMENTAR TT.MM.JJJJ HH:MM ==</b> und darunter den Text – er wird mit diesem Zeitpunkt im Ticketverlauf einsortiert.</p>\n'
         printf '<p><b>===== BESCHREIBUNG =====</b></p>\n<pre style="%s">%s</pre>\n' "$pre" "$(printf '%s' "$ORIG_DESC" | tr -d '\r' | html_esc)"
         printf '<p><b>===== NEUER KOMMENTAR =====</b></p>\n<pre style="%s"></pre>\n' "$pre"
-        for ((i = 0; i < n && i < MAX_COMMENTS_RTF; i++)); do
+        for ((i = 0; i < n; i++)); do
             c=$(printf '%s' "$COMMENTS_JSON" | jq -c ".[$i]")
             cid=$(printf '%s' "$c" | jq -r '.id')
             cauthor=$(printf '%s' "$c" | jq -r '.user.name // "Unbekannt"' | html_esc)
@@ -398,7 +398,7 @@ show_ticket() {
         para "$cnotes" 4 4; echo
     done
     if [ "$n" -gt "$MAX_COMMENTS_TERM" ]; then
-        printf '  %s… %d weitere (bis zu %d in der RTF)%s\n\n' "$GRY" $((n - MAX_COMMENTS_TERM)) "$MAX_COMMENTS_RTF" "$RST"
+        printf '  %s… %d weitere – alle Kommentare stehen in voller Länge in der RTF%s\n\n' "$GRY" $((n - MAX_COMMENTS_TERM)) "$RST"
     fi
     rule
 }
@@ -494,7 +494,7 @@ EOF_BLOCKS
     fi
 
     n=$(printf '%s' "$COMMENTS_JSON" | jq 'length')
-    for ((i = 0; i < n && i < MAX_COMMENTS_RTF; i++)); do
+    for ((i = 0; i < n; i++)); do
         c=$(printf '%s' "$COMMENTS_JSON" | jq -c ".[$i]")
         cid=$(printf '%s' "$c" | jq -r '.id')
         orig=$(printf '%s' "$c" | jq -r '.notes' | norm)

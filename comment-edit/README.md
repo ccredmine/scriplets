@@ -98,7 +98,7 @@ Nach dem Speichern erscheint der grüne Haken. **ENTER** schickt die Änderungen
 
 ## Hinweise
 
-- In der RTF landen maximal 5 Kommentare, im Terminal werden 3 angezeigt.
+- In der RTF stehen immer alle Kommentare in voller Länge; das Terminal zeigt nur die ersten 3 gekürzt an.
 - TextEdit speichert automatisch; vor ENTER trotzdem mit ⌘S sichern, damit der letzte Stand synchronisiert wird.
 - Abbruch mit `q` lässt die RTF unverändert; beim nächsten Ticket wird sie überschrieben.
 - Zeilen, die mit `==` beginnen und enden, sind als Marker reserviert – nicht im Kommentartext verwenden.

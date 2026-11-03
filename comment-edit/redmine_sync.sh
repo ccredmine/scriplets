@@ -203,6 +203,7 @@ write_rtf() {
             "$(jf '.issue.status.name' | html_esc)" "$(jf '.issue.priority.name' | html_esc)" \
             "$(jf '.issue.author.name' | html_esc)" "$(fmt_date "$(jf '.issue.created_on')")"
         printf '<p style="color: #666666;">Text unterhalb der ===== Marker bearbeiten, Marker selbst nicht ändern. Speichern (⌘S) → im Terminal ENTER.</p>\n'
+        printf '<p style="color: #666666;">Neuer Kommentar an beliebiger Stelle: Zeile <b>== KOMMENTAR TT.MM.JJJJ HH:MM ==</b> und darunter den Text – er wird mit diesem Zeitpunkt im Ticketverlauf einsortiert.</p>\n'
         printf '<p><b>===== BESCHREIBUNG =====</b></p>\n<pre style="%s">%s</pre>\n' "$pre" "$(printf '%s' "$ORIG_DESC" | tr -d '\r' | html_esc)"
         printf '<p><b>===== NEUER KOMMENTAR =====</b></p>\n<pre style="%s"></pre>\n' "$pre"
         for ((i = 0; i < n && i < MAX_COMMENTS_RTF; i++)); do
@@ -237,14 +238,63 @@ rtf_to_text() {
             -e 's/\\[a-zA-Z][a-zA-Z0-9-]*[ ]\{0,1\}//g' -e 's/[{}]//g' "$RTF_FILE"
     fi
 }
+# Marker-Zeile: "== NAME … ==" bzw. "===== NAME … =====" (zwei oder mehr '=')
 # Abschnitt unter "===== NAME ... =====" ausgeben
 section() {
     awk -v target="$1" '
-        /^===== .* =====[[:space:]]*$/ {
-            inner = $0; sub(/^===== /, "", inner); sub(/ =====[[:space:]]*$/, "", inner)
+        /^==+ [^=].* ==+[[:space:]]*$/ {
+            inner = $0; sub(/^==+ /, "", inner); sub(/ ==+[[:space:]]*$/, "", inner)
             on = (inner == target || index(inner, target " ") == 1); next
         }
         on { print }'
+}
+# Neue Kommentare mit Zeitstempel: "== KOMMENTAR TT.MM.JJJJ HH:MM ==" + Text darunter.
+# Ausgabe pro Block: "@@NEW@@<TAB><datum zeit>", Textzeilen, "@@END@@"
+extract_new_comments() {
+    awk '
+        /^==+ [^=].* ==+[[:space:]]*$/ {
+            inner = $0; sub(/^==+ /, "", inner); sub(/ ==+[[:space:]]*$/, "", inner)
+            if (on) { print "@@END@@"; on = 0 }
+            if (inner ~ /^KOMMENTAR[ \t]+[0-9]+[.\/-][0-9]+[.\/-][0-9]+([ \t]+[0-9]+:[0-9]+(:[0-9]+)?)?[ \t]*$/) {
+                dt = inner; sub(/^KOMMENTAR[ \t]+/, "", dt); sub(/[ \t]+$/, "", dt)
+                print "@@NEW@@\t" dt; on = 1
+            }
+            next
+        }
+        on { print }
+        END { if (on) print "@@END@@" }'
+}
+# Lokale Zeitangabe → ISO 8601 UTC (z. B. "02.11.2026 14:30" → 2026-11-02T13:30:00Z)
+to_iso_utc() {
+    local s="$1" ep="" f colons
+    s=$(printf '%s' "$s" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's#/#.#g')
+    colons=${s//[^:]/}
+    case "${#colons}" in 0) s="$s 00:00:00" ;; 1) s="$s:00" ;; esac
+    for f in '%d.%m.%Y %H:%M:%S' '%Y-%m-%d %H:%M:%S' '%d.%m.%y %H:%M:%S'; do
+        ep=$(date -j -f "$f" "$s" +%s 2>/dev/null) && break
+        ep=""
+    done
+    [ -n "$ep" ] || ep=$(date -d "$s" +%s 2>/dev/null) || return 1
+    TZ=UTC date -r "$ep" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$ep" '+%Y-%m-%dT%H:%M:%SZ'
+}
+# Kommentar anlegen und ID des neuen Journals ermitteln → NEW_JOURNAL_ID
+create_comment() {
+    local text="$1" prev_max
+    NEW_JOURNAL_ID=""
+    api GET "/issues/$CUR_ID.json?include=journals"
+    prev_max=$(printf '%s' "$API_BODY" | jq '[.issue.journals[]?.id] | max // 0' 2>/dev/null); prev_max=${prev_max:-0}
+    api PUT "/issues/$CUR_ID.json" "$(jq -n --arg t "$text" '{issue: {notes: $t}}')"
+    [ "$API_CODE" = 204 ] || [ "$API_CODE" = 200 ] || return 1
+    api GET "/issues/$CUR_ID.json?include=journals"
+    NEW_JOURNAL_ID=$(printf '%s' "$API_BODY" | jq -r --argjson p "$prev_max" --arg t "$text" \
+        '[.issue.journals[]? | select(.id > $p)] | (map(select((.notes // "") | gsub("\r"; "") == $t)) + .) | first | .id // ""' 2>/dev/null)
+    return 0
+}
+# Zeitstempel eines Kommentars setzen (redmine-extended-api: Backdating)
+backdate_journal() {
+    local jid="$1" iso="$2"
+    api PUT "/issues/$CUR_ID/journals/$jid/backdate.json" "$(jq -n --arg c "$iso" '{created_on: $c}')"
+    [ "$API_CODE" = 200 ]
 }
 # Vergleichs-Normalisierung: CR raus, Zeilenenden trimmen, Leerzeilen zusammenfassen/abschneiden
 norm() { tr -d '\r' | sed -e 's/[[:space:]]*$//' | cat -s | sed -e '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
@@ -386,7 +436,7 @@ sync_changes() {
     orig_desc=$(printf '%s\n' "$ORIG_DESC" | norm)
     new_comment=$(printf '%s\n' "$txt" | section 'NEUER KOMMENTAR' | norm)
 
-    if ! printf '%s\n' "$txt" | grep -q '^===== BESCHREIBUNG ====='; then
+    if ! printf '%s\n' "$txt" | grep -q '^==* BESCHREIBUNG ==*'; then
         warn "Marker „===== BESCHREIBUNG =====“ fehlt – Beschreibung bleibt unverändert."
     elif [ -z "$new_desc" ]; then
         warn "Beschreibung ist leer – bleibt unverändert."
@@ -404,6 +454,43 @@ sync_changes() {
         else
             err "Ticket-Update fehlgeschlagen (HTTP $API_CODE)."; show_api_errors
         fi
+    fi
+
+    # Neue Kommentare mit Zeitstempel ("== KOMMENTAR TT.MM.JJJJ HH:MM ==") – anlegen und rückdatieren
+    local blocks line dt body iso state=0 T=$'\t'
+    blocks=$(printf '%s\n' "$txt" | extract_new_comments)
+    if [ -n "$blocks" ]; then
+        while IFS= read -r line; do
+            case "$line" in
+                "@@NEW@@${T}"*) dt=${line#"@@NEW@@${T}"}; body=""; state=1 ;;
+                "@@END@@")
+                    [ "$state" = 1 ] || continue
+                    state=0
+                    body=$(printf '%s' "$body" | norm)
+                    if [ -z "$body" ]; then warn "Kommentar „${dt}“ ist leer – übersprungen."; continue; fi
+                    any=1
+                    if ! iso=$(to_iso_utc "$dt"); then
+                        err "Kommentar „${dt}“: Zeitangabe nicht lesbar (erwartet TT.MM.JJJJ HH:MM) – nicht angelegt."; continue
+                    fi
+                    if ! create_comment "$body"; then
+                        err "Kommentar „${dt}“ konnte nicht angelegt werden (HTTP $API_CODE)."; show_api_errors; continue
+                    fi
+                    if [ -z "$NEW_JOURNAL_ID" ]; then
+                        warn "Kommentar „${dt}“ angelegt, aber ID nicht gefunden – Zeitstempel bleibt „jetzt“."
+                    elif backdate_journal "$NEW_JOURNAL_ID" "$iso"; then
+                        ok "Kommentar #$NEW_JOURNAL_ID angelegt und auf ${dt} datiert."
+                    else
+                        case "$API_CODE" in
+                            403) warn "Kommentar #$NEW_JOURNAL_ID angelegt – Rückdatierung nicht aktiviert (Plugin-Einstellung „Backdating“)." ;;
+                            404) warn "Kommentar #$NEW_JOURNAL_ID angelegt – Rückdatierung nicht verfügbar (redmine-extended-api fehlt)." ;;
+                            *)   warn "Kommentar #$NEW_JOURNAL_ID angelegt – Rückdatierung fehlgeschlagen (HTTP $API_CODE)."; show_api_errors ;;
+                        esac
+                    fi ;;
+                *) [ "$state" = 1 ] && body="${body}${line}"$'\n' ;;
+            esac
+        done <<EOF_BLOCKS
+$blocks
+EOF_BLOCKS
     fi
 
     n=$(printf '%s' "$COMMENTS_JSON" | jq 'length')

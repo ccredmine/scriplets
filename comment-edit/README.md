@@ -15,6 +15,9 @@ Regeln:
   Formatierung bleiben exakt so, wie sie sind.
 - Erlaubt ist nur das Bearbeiten, Entfernen oder Hinzufügen von Inhalten
   innerhalb der markierten Bereiche.
+- Ein neuer Kommentar darf nur mit einer eigenen Marker-Zeile angelegt werden:
+  == KOMMENTAR TT.MM.JJJJ HH:MM ==  und darunter der Text. Er darf an jeder
+  Stelle zwischen den bestehenden Abschnitten stehen.
 - Gib den kompletten Text mit unveränderter Struktur zurück.
 ```
 
@@ -36,16 +39,31 @@ Synchronisiert werden:
 | Abschnitt in der RTF | Wirkung in Redmine |
 |---|---|
 | `===== BESCHREIBUNG =====` | Beschreibung des Tickets wird aktualisiert (nur bei Änderung) |
-| `===== NEUER KOMMENTAR =====` | Text darunter wird als neuer Kommentar angelegt |
+| `===== NEUER KOMMENTAR =====` | Text darunter wird als neuer Kommentar angelegt (Zeitpunkt: jetzt) |
+| `== KOMMENTAR TT.MM.JJJJ HH:MM ==` | neuer Kommentar mit diesem Zeitstempel – wird an der passenden Stelle im Ticketverlauf einsortiert |
 | `===== KOMMENTAR <ID> · … =====` | bestehender Kommentar wird aktualisiert (nur bei Änderung) |
 
 Leere Abschnitte oder fehlende Marker werden ignoriert – es wird nichts versehentlich gelöscht.
+
+### Neue Kommentare mit Zeitstempel
+
+An beliebiger Stelle in der RTF (z. B. zwischen zwei bestehenden Kommentaren) eine Marker-Zeile mit Datum und Uhrzeit einfügen, darunter den Text:
+
+```text
+== KOMMENTAR 01.11.2026 10:00 ==
+Telefonat mit Kunde: Freigabe erteilt, Umsetzung ab Montag.
+```
+
+Beim Sync wird der Kommentar angelegt und über die Backdating-API des Plugins **redmine-extended-api** auf den angegebenen Zeitpunkt (lokale Zeit) datiert – Redmine sortiert ihn damit chronologisch korrekt in den Verlauf ein. Mehrere solcher Blöcke sind möglich; sie werden in Dateireihenfolge verarbeitet. Erlaubte Formate: `TT.MM.JJJJ HH:MM`, `TT.MM.JJJJ HH:MM:SS`, `JJJJ-MM-TT HH:MM`, nur Datum (= 00:00). Zwei oder mehr `=` am Zeilenanfang/-ende genügen.
+
+Ist das Plugin nicht installiert oder die Funktion „Backdating“ in den Plugin-Einstellungen nicht aktiv, wird der Kommentar trotzdem angelegt – dann mit dem aktuellen Zeitpunkt, und das Script zeigt eine Warnung.
 
 ## Voraussetzungen
 
 - macOS (nutzt `textutil` und `open`), Bash ≥ 3.2
 - `curl` und `jq` (`brew install jq`)
 - Redmine-API-Key: Redmine → *Mein Konto* → *API-Zugriffsschlüssel*
+- Für datierte Kommentare: Plugin [redmine-extended-api](https://github.com/leanderkretschmer/redmine-extended-api) mit aktivierter Backdating-Funktion
 
 ## Einrichtung
 
@@ -68,7 +86,7 @@ Unten steht, mit welcher Redmine-Instanz und welchem Benutzer das Tool verbunden
 
 Links das Ticket mit Metadaten, Beschreibung und den ersten Kommentaren. Rechts die automatisch geöffnete `current-ticket.rtf`. Das Terminal wartet, bis die Datei gespeichert wird (`q` bricht ab).
 
-Nur den Text **unter** den `=====`-Markern ändern, die Marker selbst nicht anfassen.
+Nur den Text **unter** den `=====`-Markern ändern, die Marker selbst nicht anfassen. Neue Kommentare mit `== KOMMENTAR TT.MM.JJJJ HH:MM ==` einfügen.
 
 ![Ticket-Ansicht und RTF](img/02-ticket-und-rtf.png)
 
@@ -83,3 +101,4 @@ Nach dem Speichern erscheint der grüne Haken. **ENTER** schickt die Änderungen
 - In der RTF landen maximal 5 Kommentare, im Terminal werden 3 angezeigt.
 - TextEdit speichert automatisch; vor ENTER trotzdem mit ⌘S sichern, damit der letzte Stand synchronisiert wird.
 - Abbruch mit `q` lässt die RTF unverändert; beim nächsten Ticket wird sie überschrieben.
+- Zeilen, die mit `==` beginnen und enden, sind als Marker reserviert – nicht im Kommentartext verwenden.

@@ -8,7 +8,7 @@
 #      Standard-Editor (TextEdit) geöffnet
 #   3. Datei bearbeiten + speichern → Änderung wird erkannt → ✔
 #   4. ENTER synchronisiert: Beschreibung, bearbeitete Kommentare,
-#      neuer Kommentar → zurück zur Startseite, RTF wird geleert
+#      neue Kommentare, Aufwandsbuchungen → zurück zur Startseite, RTF wird geleert
 # Benötigt: bash ≥ 3.2, curl, jq, textutil (macOS)
 set -u
 
@@ -104,6 +104,12 @@ fmt_date() {
         date -r "$ep" '+%d.%m.%Y %H:%M'
     elif date -d "$iso" '+%d.%m.%Y %H:%M' 2>/dev/null; then :
     else printf '%s' "$iso"; fi
+}
+
+# Stunden (1.5 / 1.333…) → "1,5 h" / "1,33 h"; leer → "—"
+fmt_hours() {
+    [ -n "$1" ] && [ "$1" != "null" ] || { printf '—'; return; }
+    LC_ALL=C awk -v h="$1" 'BEGIN { s = sprintf("%.2f", h); sub(/0+$/, "", s); sub(/\.$/, "", s); sub(/\./, ",", s); printf "%s h", s }'
 }
 
 # ── Logo ─────────────────────────────────────────────────────────────────
@@ -204,6 +210,8 @@ write_rtf() {
             "$(jf '.issue.author.name' | html_esc)" "$(fmt_date "$(jf '.issue.created_on')")"
         printf '<p style="color: #666666;">Text unterhalb der ===== Marker bearbeiten, Marker selbst nicht ändern. Speichern (⌘S) → im Terminal ENTER.</p>\n'
         printf '<p style="color: #666666;">Neuer Kommentar an beliebiger Stelle: Zeile <b>== KOMMENTAR TT.MM.JJJJ HH:MM ==</b> und darunter den Text – er wird mit diesem Zeitpunkt im Ticketverlauf einsortiert.</p>\n'
+        printf '<p style="color: #666666;">Aufwand buchen (beliebig oft): Zeile <b>== AUFWAND TT.MM.JJJJ HH:MM 1,5h ==</b> (oder <b>09:00-10:30</b>, optional Aktivität dahinter) und darunter den Buchungskommentar.%s</p>\n' \
+            "$(sp=$(jf '.issue.total_spent_hours // .issue.spent_hours'); [ -n "$sp" ] && printf ' Bisher gebucht: %s.' "$(fmt_hours "$sp")")"
         printf '<p><b>===== BESCHREIBUNG =====</b></p>\n<pre style="%s">%s</pre>\n' "$pre" "$(printf '%s' "$ORIG_DESC" | tr -d '\r' | html_esc)"
         printf '<p><b>===== NEUER KOMMENTAR =====</b></p>\n<pre style="%s"></pre>\n' "$pre"
         for ((i = 0; i < n; i++)); do
@@ -263,6 +271,157 @@ extract_new_comments() {
         }
         on { print }
         END { if (on) print "@@END@@" }'
+}
+# Aufwandsbuchungen: "== AUFWAND TT.MM.JJJJ [HH:MM] DAUER [Aktivität] ==" + Buchungskommentar darunter.
+# Ausgabe pro Block: "@@TE@@<TAB><spec>", Textzeilen, "@@END@@"
+extract_time_entries() {
+    awk '
+        /^==+ [^=].* ==+[[:space:]]*$/ {
+            inner = $0; sub(/^==+ /, "", inner); sub(/ ==+[[:space:]]*$/, "", inner)
+            if (on) { print "@@END@@"; on = 0 }
+            if (inner ~ /^AUFWAND([ \t]|$)/) {
+                spec = inner; sub(/^AUFWAND[ \t]*/, "", spec); sub(/[ \t]+$/, "", spec)
+                print "@@TE@@\t" spec; on = 1
+            }
+            next
+        }
+        on { print }
+        END { if (on) print "@@END@@" }'
+}
+# Dauer-Token → Minuten. Erlaubt: 1,5h  2h  1.25std  90min  45m  1h30  1h30m  1:30h  1,5
+dur_minutes() {
+    local t
+    t=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    if [[ "$t" =~ ^([0-9]+)h([0-9]+)(m|min)?$ ]]; then
+        echo $(( 10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]} ))
+    elif [[ "$t" =~ ^([0-9]+):([0-9]{2})(h|std)$ ]]; then
+        echo $(( 10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]} ))
+    elif [[ "$t" =~ ^([0-9]+)(m|min|minuten)$ ]]; then
+        echo $(( 10#${BASH_REMATCH[1]} ))
+    elif [[ "$t" =~ ^([0-9]+([.,][0-9]+)?)(h|std|stunde|stunden)?$ ]]; then
+        LC_ALL=C awk -v h="${BASH_REMATCH[1]/,/.}" 'BEGIN { printf "%d\n", h * 60 + 0.5 }'
+    else
+        return 1
+    fi
+}
+# "HH:MM" → Minuten seit Mitternacht
+clock_minutes() {
+    [[ "$1" =~ ^([0-9]{1,2}):([0-9]{2})$ ]] || return 1
+    local h=$((10#${BASH_REMATCH[1]})) m=$((10#${BASH_REMATCH[2]}))
+    [ "$h" -le 23 ] && [ "$m" -le 59 ] || return 1
+    echo $((h * 60 + m))
+}
+fmt_clock() { printf '%02d:%02d' $(( ($1 / 60) % 24 )) $(( $1 % 60 )); }
+# JJJJ-MM-TT gültig? (31.02. o. ä. wird von date normalisiert → Vergleich)
+valid_date() {
+    local n
+    n=$(date -j -f '%Y-%m-%d' "$1" +%Y-%m-%d 2>/dev/null) || n=$(date -d "$1" +%Y-%m-%d 2>/dev/null) || return 1
+    [ "$n" = "$1" ]
+}
+# Aufwand-Spezifikation zerlegen → TE_DATE (JJJJ-MM-TT), TE_DATE_DE, TE_START (Min. oder leer),
+# TE_MIN (Dauer in Minuten), TE_ACT (Aktivitätsname oder leer), TE_ERR (Fehlertext)
+parse_time_spec() {
+    local s tok m d mo y want_end=0
+    TE_DATE=""; TE_DATE_DE=""; TE_START=""; TE_MIN=0; TE_ACT=""; TE_ERR=""
+    # Gedankenstriche (TextEdit) → "-", "09:00-10:30" in Tokens zerlegen
+    s=$(printf '%s' "$1" | sed -e 's/–/-/g' -e 's/—/-/g' \
+        -e 's/\([0-9]:[0-9][0-9]\)[[:space:]]*-[[:space:]]*\([0-9]\)/\1 - \2/g')
+    set -f; set -- $s; set +f
+    if [ $# -eq 0 ]; then TE_ERR="Datum fehlt"; return 1; fi
+
+    tok="${1//\//.}"; shift
+    if [[ "$tok" =~ ^([0-9]{1,2})\.([0-9]{1,2})\.([0-9]{4}|[0-9]{2})$ ]]; then
+        d=$((10#${BASH_REMATCH[1]})); mo=$((10#${BASH_REMATCH[2]})); y=${BASH_REMATCH[3]}
+        [ "${#y}" -eq 2 ] && y="20$y"
+    elif [[ "$tok" =~ ^([0-9]{4})-([0-9]{1,2})-([0-9]{1,2})$ ]]; then
+        y=${BASH_REMATCH[1]}; mo=$((10#${BASH_REMATCH[2]})); d=$((10#${BASH_REMATCH[3]}))
+    else
+        TE_ERR="„$tok“ ist kein Datum (erwartet TT.MM.JJJJ)"; return 1
+    fi
+    TE_DATE=$(printf '%04d-%02d-%02d' "$y" "$mo" "$d")
+    TE_DATE_DE=$(printf '%02d.%02d.%04d' "$d" "$mo" "$y")
+    valid_date "$TE_DATE" || { TE_ERR="Datum $TE_DATE_DE existiert nicht"; return 1; }
+
+    for tok in "$@"; do
+        case "$tok" in -|bis|Bis|BIS) want_end=1; continue ;; esac
+        if m=$(clock_minutes "$tok"); then
+            if [ -z "$TE_START" ] && [ "$want_end" = 0 ]; then
+                TE_START=$m                                            # erste Uhrzeit = Start
+            elif [ -n "$TE_START" ] && [ "$want_end" = 1 ]; then
+                TE_MIN=$(( (m - TE_START + 1440) % 1440 )); want_end=0  # Endzeit → Dauer
+            elif [ -n "$TE_START" ]; then
+                TE_MIN=$(( TE_MIN + m ))                               # zweite Uhrzeit = Dauer H:MM
+            else
+                TE_ERR="Endzeit „$tok“ ohne Startzeit"; return 1
+            fi
+        elif [ -z "$TE_ACT" ] && m=$(dur_minutes "$tok"); then
+            TE_MIN=$(( TE_MIN + m ))
+        else
+            TE_ACT="${TE_ACT:+$TE_ACT }$tok"                           # Rest = Aktivität
+        fi
+    done
+    [ "$want_end" = 0 ] || { TE_ERR="Endzeit fehlt"; return 1; }
+    [ "$TE_MIN" -gt 0 ] || { TE_ERR="Dauer fehlt (z. B. 1,5h · 90min · 09:00-10:30)"; return 1; }
+    return 0
+}
+# Aktivitäten (Projekt, sonst global) einmal pro Sync laden → ACTIVITIES_JSON [{id,name,is_default}]
+ACTIVITIES_JSON=""
+load_activities() {
+    [ -n "$ACTIVITIES_JSON" ] && return 0
+    local pid glob proj
+    api GET '/enumerations/time_entry_activities.json'
+    glob=$(printf '%s' "$API_BODY" | jq -c '[.time_entry_activities[]? | {id, name, is_default: (.is_default // false)}]' 2>/dev/null)
+    [ -n "$glob" ] || glob='[]'
+    pid=$(jf '.issue.project.id'); proj='[]'
+    if [ -n "$pid" ]; then
+        api GET "/projects/$pid.json?include=time_entry_activities"
+        proj=$(printf '%s' "$API_BODY" | jq -c '[.project.time_entry_activities[]? | {id, name}]' 2>/dev/null)
+        [ -n "$proj" ] || proj='[]'
+    fi
+    # Projektliste bevorzugen (projektspezifisch aktivierte Aktivitäten), Default-Flag aus globaler Liste
+    ACTIVITIES_JSON=$(jq -cn --argjson g "$glob" --argjson p "$proj" '
+        if ($p | length) > 0 then
+            $p | map(. as $a | . + {is_default: (($g | map(select(.name == $a.name)) | first | .is_default) // false)})
+        else $g end')
+}
+# Aktivität auflösen: Name (ganz oder Anfang, Groß-/Kleinschreibung egal) oder ID; leer → REDMINE_ACTIVITY / Default
+# → ACT_ID (leer = Redmine entscheidet), ACT_NAME
+resolve_activity() {
+    local want="${1:-${REDMINE_ACTIVITY:-}}" hit
+    ACT_ID=""; ACT_NAME=""
+    load_activities
+    if [ -z "$want" ]; then
+        hit=$(printf '%s' "$ACTIVITIES_JSON" | jq -c 'map(select(.is_default)) | first // empty')
+    elif [[ "$want" =~ ^[0-9]+$ ]]; then
+        hit=$(printf '%s' "$ACTIVITIES_JSON" | jq -c --argjson i "$want" 'map(select(.id == $i)) | first // empty')
+        [ -n "$hit" ] || { ACT_ID="$want"; ACT_NAME="ID $want"; return 0; }
+    else
+        hit=$(printf '%s' "$ACTIVITIES_JSON" | jq -c --arg w "$want" '
+            ($w | ascii_downcase) as $w
+            | (map(select((.name | ascii_downcase) == $w)) + map(select(.name | ascii_downcase | startswith($w))))
+            | first // empty')
+        [ -n "$hit" ] || return 1
+    fi
+    [ -n "$hit" ] || return 0
+    ACT_ID=$(printf '%s' "$hit" | jq -r '.id'); ACT_NAME=$(printf '%s' "$hit" | jq -r '.name')
+}
+# Zeitbuchung anlegen: create_time_entry DATUM STUNDEN KOMMENTAR ACT_ID START END → NEW_TE_ID
+create_time_entry() {
+    local te
+    NEW_TE_ID=""
+    te=$(jq -n --argjson iid "$CUR_ID" --arg d "$1" --arg h "$2" --arg c "$3" --arg a "$4" \
+              --arg sf "${REDMINE_TIME_START_FIELD_ID:-}" --arg ef "${REDMINE_TIME_END_FIELD_ID:-}" \
+              --arg s "$5" --arg e "$6" '
+        {issue_id: $iid, spent_on: $d, hours: ($h | tonumber), comments: $c}
+        + (if $a != "" then {activity_id: ($a | tonumber)} else {} end)
+        + ([ (if $sf != "" and $s != "" then {id: ($sf | tonumber), value: $s} else empty end),
+             (if $ef != "" and $e != "" then {id: ($ef | tonumber), value: $e} else empty end) ]
+           | if length > 0 then {custom_fields: .} else {} end)
+        | {time_entry: .}')
+    api POST '/time_entries.json' "$te"
+    [ "$API_CODE" = 201 ] || [ "$API_CODE" = 200 ] || return 1
+    NEW_TE_ID=$(printf '%s' "$API_BODY" | jq -r '.time_entry.id // ""' 2>/dev/null)
+    return 0
 }
 # Lokale Zeitangabe → ISO 8601 UTC (z. B. "02.11.2026 14:30" → 2026-11-02T13:30:00Z)
 to_iso_utc() {
@@ -384,6 +543,9 @@ show_ticket() {
     meta_row 'Tracker'  "$(jf '.issue.tracker.name')"  'Projekt'      "$(jf '.issue.project.name')"
     meta_row 'Autor'    "$(jf '.issue.author.name')"   'Zugewiesen'   "$assignee"
     meta_row 'Erstellt' "$(fmt_date "$(jf '.issue.created_on')")" 'Aktualisiert' "$(fmt_date "$(jf '.issue.updated_on')")"
+    local spent est
+    spent=$(jf '.issue.total_spent_hours // .issue.spent_hours'); est=$(jf '.issue.total_estimated_hours // .issue.estimated_hours')
+    meta_row 'Aufwand' "$(fmt_hours "$spent")" 'Geschätzt' "$(fmt_hours "$est")"
     echo
     h1 'Beschreibung'; echo
     para "$ORIG_DESC" 2 10; echo
@@ -491,6 +653,51 @@ sync_changes() {
         done <<EOF_BLOCKS
 $blocks
 EOF_BLOCKS
+    fi
+
+    # Aufwandsbuchungen ("== AUFWAND TT.MM.JJJJ [HH:MM] DAUER [Aktivität] ==") – Zeiterfassung anlegen
+    local spec hours tcomment tstart tend label
+    blocks=$(printf '%s\n' "$txt" | extract_time_entries); state=0
+    if [ -n "$blocks" ]; then
+        ACTIVITIES_JSON=""
+        while IFS= read -r line; do
+            case "$line" in
+                "@@TE@@${T}"*) spec=${line#"@@TE@@${T}"}; body=""; state=1 ;;
+                "@@END@@")
+                    [ "$state" = 1 ] || continue
+                    state=0; any=1
+                    if ! parse_time_spec "$spec"; then
+                        err "Aufwand „${spec}“: ${TE_ERR} – nicht gebucht."; continue
+                    fi
+                    if ! resolve_activity "$TE_ACT"; then
+                        err "Aufwand „${spec}“: Aktivität „${TE_ACT}“ unbekannt – nicht gebucht."
+                        printf '      %sverfügbar: %s%s\n' "$GRY" "$(printf '%s' "$ACTIVITIES_JSON" | jq -r 'map(.name) | join(", ")')" "$RST"
+                        continue
+                    fi
+                    hours=$(LC_ALL=C awk -v m="$TE_MIN" 'BEGIN { printf "%.2f", m / 60 }')
+                    tstart=""; tend=""
+                    if [ -n "$TE_START" ]; then
+                        tstart=$(fmt_clock "$TE_START"); tend=$(fmt_clock $((TE_START + TE_MIN)))
+                    fi
+                    # Buchungskommentar ist in Redmine einzeilig → Zeilen mit " / " verbinden
+                    tcomment=$(printf '%s' "$body" | norm | awk 'NF { sub(/^[ \t]+/, ""); s = s (s == "" ? "" : " / ") $0 } END { printf "%s", s }')
+                    if [ -n "$tstart" ] && [ "${REDMINE_TIME_IN_COMMENT:-1}" != 0 ]; then
+                        tcomment="${tstart}–${tend}${tcomment:+ · $tcomment}"
+                    fi
+                    if [ "${#tcomment}" -gt 1024 ]; then
+                        tcomment="${tcomment:0:1023}…"; warn "Aufwand ${TE_DATE_DE}: Kommentar auf 1024 Zeichen gekürzt."
+                    fi
+                    label="${TE_DATE_DE}${tstart:+ ${tstart}–${tend}}, $(fmt_hours "$hours")${ACT_NAME:+, $ACT_NAME}"
+                    if create_time_entry "$TE_DATE" "$hours" "$tcomment" "$ACT_ID" "$tstart" "$tend"; then
+                        ok "Aufwand ${NEW_TE_ID:+#$NEW_TE_ID }gebucht: ${label}."
+                    else
+                        err "Aufwand (${label}) konnte nicht gebucht werden (HTTP $API_CODE)."; show_api_errors
+                    fi ;;
+                *) [ "$state" = 1 ] && body="${body}${line}"$'\n' ;;
+            esac
+        done <<EOF_TE
+$blocks
+EOF_TE
     fi
 
     n=$(printf '%s' "$COMMENTS_JSON" | jq 'length')

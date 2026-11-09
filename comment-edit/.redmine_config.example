@@ -1,2 +1,7 @@
 REDMINE_URL="https://pm.example.com"
 REDMINE_API_KEY="dein-api-key"
+# Optional – Aufwandsbuchungen (== AUFWAND … ==):
+# REDMINE_ACTIVITY="Entwicklung"      # Standard-Aktivität (Name oder ID)
+# REDMINE_TIME_START_FIELD_ID=5       # Custom-Field-ID für Startzeit der Zeitbuchung
+# REDMINE_TIME_END_FIELD_ID=6         # Custom-Field-ID für Endzeit der Zeitbuchung
+# REDMINE_TIME_IN_COMMENT=0           # Zeitspanne nicht in den Buchungskommentar schreiben

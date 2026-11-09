@@ -18,6 +18,9 @@ Regeln:
 - Ein neuer Kommentar darf nur mit einer eigenen Marker-Zeile angelegt werden:
   == KOMMENTAR TT.MM.JJJJ HH:MM ==  und darunter der Text. Er darf an jeder
   Stelle zwischen den bestehenden Abschnitten stehen.
+- Aufwand darf nur mit einer eigenen Marker-Zeile gebucht werden:
+  == AUFWAND TT.MM.JJJJ HH:MM DAUER ==  (z. B. 1,5h) und darunter der
+  Buchungskommentar. Beliebig viele solcher Blöcke sind erlaubt.
 - Gib den kompletten Text mit unveränderter Struktur zurück.
 ```
 
@@ -41,6 +44,7 @@ Synchronisiert werden:
 | `===== BESCHREIBUNG =====` | Beschreibung des Tickets wird aktualisiert (nur bei Änderung) |
 | `===== NEUER KOMMENTAR =====` | Text darunter wird als neuer Kommentar angelegt (Zeitpunkt: jetzt) |
 | `== KOMMENTAR TT.MM.JJJJ HH:MM ==` | neuer Kommentar mit diesem Zeitstempel – wird an der passenden Stelle im Ticketverlauf einsortiert |
+| `== AUFWAND TT.MM.JJJJ HH:MM 1,5h ==` | neue Zeitbuchung (Aufwand) am angegebenen Tag mit Dauer, Startzeit und Buchungskommentar |
 | `===== KOMMENTAR <ID> · … =====` | bestehender Kommentar wird aktualisiert (nur bei Änderung) |
 
 Leere Abschnitte oder fehlende Marker werden ignoriert – es wird nichts versehentlich gelöscht.
@@ -58,11 +62,47 @@ Beim Sync wird der Kommentar angelegt und über die Backdating-API des Plugins *
 
 Ist das Plugin nicht installiert oder die Funktion „Backdating“ in den Plugin-Einstellungen nicht aktiv, wird der Kommentar trotzdem angelegt – dann mit dem aktuellen Zeitpunkt, und das Script zeigt eine Warnung.
 
+### Aufwand buchen (Zeiterfassung)
+
+Beliebig viele Zeitbuchungen lassen sich an jeder Stelle der RTF anlegen – je Buchung eine Marker-Zeile, darunter der Buchungskommentar:
+
+```text
+== AUFWAND 03.11.2026 09:00 1,5h ==
+Fehleranalyse und Telefonat mit dem Kunden
+
+== AUFWAND 04.11.2026 13:15-14:00 Support ==
+Rückfrage zur Freigabe
+
+== AUFWAND 05.11.2026 90min ==
+```
+
+Aufbau der Marker-Zeile: `AUFWAND <Datum> [<Startzeit>] <Dauer> [<Aktivität>]`
+
+| Teil | Formate | Pflicht |
+|---|---|---|
+| Datum | `TT.MM.JJJJ`, `TT.MM.JJ`, `JJJJ-MM-TT` | ja |
+| Startzeit | `HH:MM` | nein |
+| Dauer | `1,5h` · `2h` · `1.25std` · `90min` · `45m` · `1h30` · `1:30h` · `1,5` – oder statt Startzeit + Dauer eine Spanne `09:00-10:30` / `09:00 bis 10:30` | ja |
+| Aktivität | Name (oder Anfang davon, z. B. `entw`) bzw. ID der Redmine-Aktivität | nein – sonst `REDMINE_ACTIVITY` aus der Config, sonst Standard-Aktivität |
+
+- Gebucht wird als der verbundene Benutzer auf das geöffnete Ticket (`spent_on` = Datum, `hours` = Dauer).
+- Der Text unter dem Marker wird zum Buchungskommentar; mehrere Zeilen werden mit ` / ` verbunden (Redmine erlaubt nur eine Zeile, max. 1024 Zeichen). Ein leerer Kommentar ist erlaubt.
+- **Startzeit:** Redmine kennt für Zeitbuchungen nur ein Datum, keine Uhrzeit. Ist eine Startzeit angegeben, wird die Spanne deshalb vor den Kommentar geschrieben (`09:00–10:30 · Fehleranalyse …`). Gibt es in Redmine benutzerdefinierte Felder für Zeitbuchungen (z. B. „Beginn“/„Ende“), können deren IDs in `.redmine_config` hinterlegt werden – dann werden Start-/Endzeit zusätzlich dort gespeichert:
+
+  ```bash
+  REDMINE_TIME_START_FIELD_ID=5   # Custom-Field „Beginn“ (Zeitbuchung)
+  REDMINE_TIME_END_FIELD_ID=6     # Custom-Field „Ende“ (Zeitbuchung)
+  REDMINE_TIME_IN_COMMENT=0       # Spanne dann nicht mehr in den Kommentar schreiben
+  ```
+- Fehlerhafte Blöcke (ungültiges Datum, fehlende Dauer, unbekannte Aktivität) werden mit Meldung übersprungen – die übrigen Buchungen laufen trotzdem.
+- Der bisher gebuchte Aufwand des Tickets steht im Terminal (`Aufwand`) und im Kopf der RTF.
+
 ## Voraussetzungen
 
 - macOS (nutzt `textutil` und `open`), Bash ≥ 3.2
 - `curl` und `jq` (`brew install jq`)
 - Redmine-API-Key: Redmine → *Mein Konto* → *API-Zugriffsschlüssel*
+- Für Aufwandsbuchungen: Modul *Zeiterfassung* im Projekt aktiv und Recht *Aufwand buchen*
 - Für datierte Kommentare: Plugin [redmine-extended-api](https://github.com/leanderkretschmer/redmine-extended-api) mit aktivierter Backdating-Funktion
 
 ## Einrichtung
